@@ -54,7 +54,10 @@ async fn main() {
     let stealth = std::env::var("OBSCURA_STEALTH")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
-    let context = Arc::new(BrowserContext::with_options("worker".to_string(), proxy, stealth));
+    let accept_invalid_certs = std::env::var("OBSCURA_INSECURE")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let context = Arc::new(BrowserContext::with_options("worker".to_string(), proxy, stealth, accept_invalid_certs));
     let mut page = Page::new("page-1".to_string(), context);
 
     let stdin = tokio::io::stdin();

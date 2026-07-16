@@ -99,6 +99,9 @@ pub struct ObscuraState {
     // drained by the Page into its network_events so the CDP layer emits
     // Network.requestWillBeSent / responseReceived for them (issue #406).
     pub js_network_events: Vec<JsNetworkEvent>,
+    /// When true, accept invalid TLS certificates (self-signed, expired, etc).
+    /// Set from BrowserContext.accept_invalid_certs.
+    pub accept_invalid_certs: bool,
 }
 
 impl ObscuraState {
@@ -123,6 +126,7 @@ impl ObscuraState {
             network_response_body_counter: 0,
             fetched_urls: Vec::new(),
             js_network_events: Vec::new(),
+            accept_invalid_certs: false,
         }
     }
 }
@@ -538,10 +542,7 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
 // ObscuraHttpClient was configured with.
 //
 // The per-request build cost is negligible (≪1ms) compared with the actual
-// network round-trip; the simplification is worth not having to invalidate
-// a cache when the proxy is reconfigured between fetches.
-//
-// Process-wide cache keyed by proxy URL. Previously we built a fresh
+// Process-wide cache keyed by proxy URL and insecure flag. Previously we built a fresh
 // reqwest::Client on every op_fetch_url call (every JS fetch(), XHR,
 // dynamic script load). Each build re-initialised TLS roots and a
 // fresh connection pool with zero reuse, costing ~5ms per fetch on top
@@ -555,11 +556,11 @@ static FETCH_CLIENT_CACHE: std::sync::OnceLock<
 
 /// Shared HTTP client cache for any code in obscura-js that needs a
 /// reqwest::Client (op_fetch_url for JS-side fetch/XHR, the ES module
-/// loader for dynamic imports). Keyed by proxy URL ("" = direct).
-/// One client per distinct proxy, reused for every request, so the
+/// loader for dynamic imports). Keyed by proxy URL + insecure flag.
+/// One client per distinct config, reused for every request, so the
 /// connection pool actually warms up.
-pub fn cached_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let key = proxy_url.unwrap_or("").to_string();
+pub fn cached_request_client(proxy_url: Option<&str>, accept_invalid_certs: bool) -> Result<reqwest::Client, String> {
+    let key = format!("{}|{}", proxy_url.unwrap_or(""), accept_invalid_certs);
     let cache = FETCH_CLIENT_CACHE
         .get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
     if let Ok(read) = cache.read() {
@@ -567,14 +568,14 @@ pub fn cached_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client,
             return Ok(client.clone());
         }
     }
-    let client = build_request_client(proxy_url)?;
+    let client = build_request_client(proxy_url, accept_invalid_certs)?;
     if let Ok(mut write) = cache.write() {
         write.entry(key).or_insert_with(|| client.clone());
     }
     Ok(client)
 }
 
-fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+fn build_request_client(proxy_url: Option<&str>, accept_invalid_certs: bool) -> Result<reqwest::Client, String> {
     // Redirects are followed manually below so each hop can be re-validated
     // against the same SSRF policy as the initial URL (GHSA-8v6v-g4rh-jmcm).
     // With reqwest's default auto-follow, an attacker-controlled origin can
@@ -594,6 +595,7 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_millis(timeout_ms))
+        .danger_accept_invalid_certs(accept_invalid_certs)
         // SSRF guard: also reject hostnames that resolve to a private/loopback IP.
         .dns_resolver(std::sync::Arc::new(obscura_net::SsrfGuardResolver::new(false)))
         // Be explicit about pool size: default is unbounded which is fine,
@@ -642,7 +644,7 @@ async fn op_fetch_url(
         }
     }
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client) = {
+    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, accept_invalid_certs) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let mut gs = gs.borrow_mut();
@@ -667,6 +669,7 @@ async fn op_fetch_url(
         // reqwest::Client. Without this, op_fetch_url silently bypasses
         // BrowserContext.proxy_url for every JS fetch() / XHR call.
         let proxy_url = gs.http_client.as_ref().and_then(|c| c.proxy_url().map(|s| s.to_string()));
+        let accept_invalid_certs = gs.accept_invalid_certs;
         tracing::debug!("op_fetch_url: intercept_enabled={}, has_tx={}", gs.intercept_enabled, gs.intercept_tx.is_some());
         let itx = if gs.intercept_enabled {
             gs.intercept_counter += 1;
@@ -674,7 +677,7 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone())
+        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), accept_invalid_certs)
     };
 
     // Slots the interception channel can override via Continue so a consumer
@@ -757,7 +760,7 @@ async fn op_fetch_url(
     let method = override_method.unwrap_or(method);
     let body = override_body.unwrap_or(body);
 
-    let client = cached_request_client(proxy_url.as_deref())
+    let client = cached_request_client(proxy_url.as_deref(), accept_invalid_certs)
         .map_err(deno_error::JsErrorBox::generic)?;
 
     let request_origin = url::Url::parse(&url)

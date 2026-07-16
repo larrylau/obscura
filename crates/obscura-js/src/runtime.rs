@@ -106,17 +106,17 @@ impl ObscuraJsRuntime {
     }
 
     pub fn with_base_url(base_url: &str) -> Self {
-        Self::with_base_url_and_proxy(base_url, None)
+        Self::with_base_url_and_proxy(base_url, None, false)
     }
 
     /// Construct a runtime whose ES-module loader routes dynamic imports
     /// through `proxy_url` (#139). `None` is equivalent to `with_base_url`
     /// (direct connection).
-    pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
+    pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>, accept_invalid_certs: bool) -> Self {
         let state = Rc::new(RefCell::new(ObscuraState::new()));
         let state_clone = state.clone();
 
-        let module_loader = Rc::new(ObscuraModuleLoader::with_proxy(base_url, proxy_url));
+        let module_loader = Rc::new(ObscuraModuleLoader::with_proxy(base_url, proxy_url, accept_invalid_certs));
 
         let mut runtime = JsRuntime::new(RuntimeOptions {
             extensions: vec![build_extension()],
@@ -126,6 +126,9 @@ impl ObscuraJsRuntime {
         });
 
         runtime.op_state().borrow_mut().put(state_clone);
+
+        // Set accept_invalid_certs in the state
+        state.borrow_mut().accept_invalid_certs = accept_invalid_certs;
 
         runtime
             .execute_script(
@@ -2468,14 +2471,14 @@ mod tests {
         use obscura_net::{CookieJar, ObscuraHttpClient};
         let jar = std::sync::Arc::new(CookieJar::new());
         let configured =
-            ObscuraHttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"));
+            ObscuraHttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"), false);
         assert_eq!(
             configured.proxy_url(),
             Some("http://proxy.test:8080"),
             "proxy_url() must expose the value passed to with_options"
         );
 
-        let direct = ObscuraHttpClient::with_options(jar, None);
+        let direct = ObscuraHttpClient::with_options(jar, None, false);
         assert_eq!(
             direct.proxy_url(),
             None,
@@ -2489,6 +2492,7 @@ mod tests {
         let loader = ObscuraModuleLoader::with_proxy(
             "https://example.com/",
             Some("http://proxy.test:8080".to_string()),
+            false,
         );
         assert_eq!(loader.proxy_url.as_deref(), Some("http://proxy.test:8080"));
         assert_eq!(loader.base_url, "https://example.com/");
@@ -2503,10 +2507,11 @@ mod tests {
         // Sanity-check the public ctor that page.rs uses to thread proxy
         // through to the module loader. Direct (None) and proxied paths
         // must both initialise the JS environment.
-        let _direct = ObscuraJsRuntime::with_base_url_and_proxy("https://example.com/", None);
+        let _direct = ObscuraJsRuntime::with_base_url_and_proxy("https://example.com/", None, false);
         let _proxied = ObscuraJsRuntime::with_base_url_and_proxy(
             "https://example.com/",
             Some("http://proxy.test:8080".to_string()),
+            false,
         );
     }
 

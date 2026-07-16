@@ -80,7 +80,7 @@ impl CdpContext {
         user_agent: Option<String>,
         storage_dir: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::_new_inner(proxy, stealth, user_agent, storage_dir, false, false)
+        Self::_new_inner(proxy, stealth, user_agent, storage_dir, false, false, false)
     }
 
     pub fn new_with_security(
@@ -89,11 +89,11 @@ impl CdpContext {
         user_agent: Option<String>,
         allow_file_access: bool,
     ) -> Self {
-        Self::_new_inner(proxy, stealth, user_agent, None, allow_file_access, false)
+        Self::_new_inner(proxy, stealth, user_agent, None, allow_file_access, false, false)
     }
 
     /// Kitchen-sink constructor that also threads `allow_private_network`
-    /// (issue #33). Older `new_with_*` builders stay as-is.
+    /// (issue #33) and `accept_invalid_certs` (--insecure).
     pub fn new_full(
         proxy: Option<String>,
         stealth: bool,
@@ -101,9 +101,10 @@ impl CdpContext {
         storage_dir: Option<std::path::PathBuf>,
         allow_file_access: bool,
         allow_private_network: bool,
+        accept_invalid_certs: bool,
     ) -> Self {
         Self::_new_inner(
-            proxy, stealth, user_agent, storage_dir, allow_file_access, allow_private_network,
+            proxy, stealth, user_agent, storage_dir, allow_file_access, allow_private_network, accept_invalid_certs,
         )
     }
 
@@ -114,6 +115,7 @@ impl CdpContext {
         storage_dir: Option<std::path::PathBuf>,
         allow_file_access: bool,
         allow_private_network: bool,
+        accept_invalid_certs: bool,
     ) -> Self {
         let mut ctx = BrowserContext::with_storage_and_network(
             "default".to_string(),
@@ -122,6 +124,7 @@ impl CdpContext {
             user_agent,
             storage_dir,
             allow_private_network,
+            accept_invalid_certs,
         );
         ctx.allow_file_access = allow_file_access;
         let default_context = Arc::new(ctx);

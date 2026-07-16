@@ -78,12 +78,12 @@ pub struct BrowserState {
 }
 
 impl BrowserState {
-    pub fn new(proxy: Option<String>, user_agent: Option<String>, stealth: bool) -> Self {
+    pub fn new(proxy: Option<String>, user_agent: Option<String>, stealth: bool, accept_invalid_certs: bool) -> Self {
         BrowserState {
             tabs: std::collections::BTreeMap::new(),
             active_tab: None,
             tab_counter: 0,
-            context: Arc::new(BrowserContext::with_options("mcp".to_string(), proxy, stealth)),
+            context: Arc::new(BrowserContext::with_options("mcp".to_string(), proxy, stealth, accept_invalid_certs)),
             user_agent,
             console_messages: Vec::new(),
             interactive_refs: HashMap::new(),
@@ -170,13 +170,13 @@ pub(crate) async fn dispatch(method: &str, id: Value, params: &Value, state: &mu
     }
 }
 
-pub async fn run(proxy: Option<String>, user_agent: Option<String>, stealth: bool) -> Result<()> {
+pub async fn run(proxy: Option<String>, user_agent: Option<String>, stealth: bool, accept_invalid_certs: bool) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
     let mut writer = stdout;
 
-    let mut state = BrowserState::new(proxy, user_agent, stealth);
+    let mut state = BrowserState::new(proxy, user_agent, stealth, accept_invalid_certs);
 
     loop {
         // MCP stdio transport: newline-delimited JSON (one message per line)

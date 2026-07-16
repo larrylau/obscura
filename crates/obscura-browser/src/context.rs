@@ -30,11 +30,15 @@ pub struct BrowserContext {
     /// models: file:// is a local file-system read, while private-network is
     /// the broader SSRF gate from issue #4.
     pub allow_private_network: bool,
+    /// When true, accept invalid TLS certificates (self-signed, expired, etc).
+    /// Set via `--insecure` on the CLI. WARNING: This disables certificate
+    /// validation and exposes connections to man-in-the-middle attacks.
+    pub accept_invalid_certs: bool,
 }
 
 impl BrowserContext {
     pub fn new(id: String) -> Self {
-        Self::_new_inner(id, None, false, None, None, false)
+        Self::_new_inner(id, None, false, None, None, false, false)
     }
 
     /// Create a BrowserContext with an optional storage directory.
@@ -44,7 +48,7 @@ impl BrowserContext {
         id: String,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, None, false, None, storage_dir, false)
+        Self::_new_inner(id, None, false, None, storage_dir, false, false)
     }
 
     /// Create a BrowserContext with full options including storage_dir.
@@ -54,8 +58,9 @@ impl BrowserContext {
         stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
+        accept_invalid_certs: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false, accept_invalid_certs)
     }
 
     /// Variant that also accepts the `allow_private_network` opt-in. All
@@ -68,8 +73,9 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
+        accept_invalid_certs: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network, accept_invalid_certs)
     }
 
     fn _new_inner(
@@ -79,6 +85,7 @@ impl BrowserContext {
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
+        accept_invalid_certs: bool,
     ) -> Self {
         let cookie_jar = Arc::new(CookieJar::new());
 
@@ -102,6 +109,7 @@ impl BrowserContext {
             cookie_jar.clone(),
             proxy_url.as_deref(),
             allow_private_network,
+            accept_invalid_certs,
         );
         if stealth {
             client.block_trackers = true;
@@ -133,11 +141,12 @@ impl BrowserContext {
             allow_file_access: false,
             storage_dir,
             allow_private_network,
+            accept_invalid_certs,
         }
     }
 
-    pub fn with_options(id: String, proxy_url: Option<String>, stealth: bool) -> Self {
-        Self::with_full_options(id, proxy_url, stealth, None)
+    pub fn with_options(id: String, proxy_url: Option<String>, stealth: bool, accept_invalid_certs: bool) -> Self {
+        Self::with_full_options(id, proxy_url, stealth, None, accept_invalid_certs)
     }
 
     pub fn with_full_options(
@@ -145,12 +154,13 @@ impl BrowserContext {
         proxy_url: Option<String>,
         stealth: bool,
         user_agent: Option<String>,
+        accept_invalid_certs: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false)
+        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false, accept_invalid_certs)
     }
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
-        Self::with_options(id, proxy_url, false)
+        Self::with_options(id, proxy_url, false, false)
     }
 
     /// Persist cookies to disk if storage_dir is configured.
@@ -179,6 +189,7 @@ mod tests {
             None,
             false,
             Some("Custom-UA/1.0".to_string()),
+            false,
         );
         assert_eq!(ctx.user_agent, "Custom-UA/1.0");
         let client_ua = ctx.http_client.user_agent.read().await.clone();
@@ -192,6 +203,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
         assert!(ctx.user_agent.contains("Chrome"));
         let client_ua = ctx.http_client.user_agent.read().await.clone();
@@ -201,7 +213,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn with_options_keeps_default_user_agent() {
-        let ctx = BrowserContext::with_options("test".to_string(), None, false);
+        let ctx = BrowserContext::with_options("test".to_string(), None, false, false);
         assert!(ctx.user_agent.contains("Chrome"));
     }
 }

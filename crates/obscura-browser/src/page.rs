@@ -292,6 +292,7 @@ impl Page {
         let mut rt = ObscuraJsRuntime::with_base_url_and_proxy(
             &self.url_string(),
             self.context.proxy_url.clone(),
+            self.context.accept_invalid_certs,
         );
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);

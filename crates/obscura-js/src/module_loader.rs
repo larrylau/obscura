@@ -14,17 +14,20 @@ pub struct ObscuraModuleLoader {
     /// `None` keeps the pre-#139 direct-connection behaviour for callers
     /// that haven't been updated.
     pub proxy_url: Option<String>,
+    /// When true, accept invalid TLS certificates.
+    pub accept_invalid_certs: bool,
 }
 
 impl ObscuraModuleLoader {
     pub fn new(base_url: &str) -> Self {
-        Self::with_proxy(base_url, None)
+        Self::with_proxy(base_url, None, false)
     }
 
-    pub fn with_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
+    pub fn with_proxy(base_url: &str, proxy_url: Option<String>, accept_invalid_certs: bool) -> Self {
         ObscuraModuleLoader {
             base_url: base_url.to_string(),
             proxy_url,
+            accept_invalid_certs,
         }
     }
 }
@@ -64,6 +67,9 @@ impl ModuleLoader for ObscuraModuleLoader {
         // Capture the loader's proxy here so the async closure below owns a
         // plain Option<String> rather than borrowing &self across an `await`.
         let proxy_url = self.proxy_url.clone();
+        // Capture accept_invalid_certs before the async block to avoid
+        // lifetime issues with `self` in the async closure.
+        let accept_invalid_certs = self.accept_invalid_certs;
 
         ModuleLoadResponse::Async(Pin::from(Box::new(async move {
             // Reuse the process-wide cached client (same one op_fetch_url
@@ -73,7 +79,7 @@ impl ModuleLoader for ObscuraModuleLoader {
             // every chunk. The cache means the first import on a given
             // proxy pays the build cost once and every chunk after reuses
             // the same warm pool.
-            let client = crate::ops::cached_request_client(proxy_url.as_deref())
+            let client = crate::ops::cached_request_client(proxy_url.as_deref(), accept_invalid_certs)
                 .map_err(io_err)?;
 
             tracing::debug!(

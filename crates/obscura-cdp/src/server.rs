@@ -84,7 +84,7 @@ pub async fn start_with_host_and_security(
     storage_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     start_with_full_serve_options(
-        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false,
+        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false, false,
     )
     .await
 }
@@ -99,14 +99,14 @@ pub async fn start_with_host_security_and_storage(
     storage_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     start_with_full_serve_options(
-        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false,
+        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false, false,
     )
     .await
 }
 
 /// Full serve entry point that also accepts `allow_private_network` (issue
-/// #33). Older entry points default it to `false` so existing callers and
-/// public API consumers are unaffected.
+/// #33) and `accept_invalid_certs` (--insecure). Older entry points default
+/// them to `false` so existing callers and public API consumers are unaffected.
 pub async fn start_with_full_serve_options(
     port: u16,
     host: &str,
@@ -116,6 +116,7 @@ pub async fn start_with_full_serve_options(
     allow_file_access: bool,
     storage_dir: Option<std::path::PathBuf>,
     allow_private_network: bool,
+    accept_invalid_certs: bool,
 ) -> anyhow::Result<()> {
     let ip: std::net::IpAddr = host
         .parse()
@@ -181,7 +182,7 @@ pub async fn start_with_full_serve_options(
 
             let _processor_handle = tokio::task::spawn_local(cdp_processor(
                 msg_rx, proxy, stealth, user_agent, allow_file_access, storage_dir,
-                allow_private_network,
+                allow_private_network, accept_invalid_certs,
                 shutdown_flag,
                 shutdown_notify.clone(),
             ));
@@ -341,6 +342,7 @@ async fn cdp_processor(
     allow_file_access: bool,
     storage_dir: Option<std::path::PathBuf>,
     allow_private_network: bool,
+    accept_invalid_certs: bool,
     shutdown_flag: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
 ) {
@@ -351,6 +353,7 @@ async fn cdp_processor(
         storage_dir,
         allow_file_access,
         allow_private_network,
+        accept_invalid_certs,
     );
     let (itx, irx) = mpsc::unbounded_channel::<obscura_js::ops::InterceptedRequest>();
     ctx.intercept_tx = Some(itx);

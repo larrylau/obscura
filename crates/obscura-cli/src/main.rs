@@ -49,6 +49,13 @@ struct Args {
     #[arg(long, global = true)]
     allow_private_network: bool,
 
+    /// Ignore SSL certificate errors (self-signed, expired, etc).
+    /// WARNING: This disables certificate validation and exposes connections
+    /// to man-in-the-middle attacks. Use only for testing against
+    /// self-signed certificates in development.
+    #[arg(long, global = true)]
+    insecure: bool,
+
     /// Pass raw flags to V8, in the same form V8/Chromium/Node accept
     /// (e.g. `"--max-old-space-size=4096 --max-semi-space-size=64 --expose-gc"`).
     /// Applied once at startup before any isolate is created.
@@ -360,6 +367,7 @@ async fn main() -> anyhow::Result<()> {
                 obscura_cdp::start_with_full_serve_options(
                     port, &host, proxy, stealth, user_agent, allow_file_access, storage_dir,
                     args.allow_private_network,
+                    args.insecure,
                 ).await?;
             }
         }
@@ -377,12 +385,12 @@ async fn main() -> anyhow::Result<()> {
                     ),
                 }
                 let urls = read_urls_from_file(&file)?;
-                run_batch_fetch(urls, concurrency.get(), timeout, user_agent, global_proxy, output, quiet).await?;
+                run_batch_fetch(urls, concurrency.get(), timeout, user_agent, global_proxy, output, quiet, args.insecure).await?;
             } else {
                 let url = url.ok_or_else(|| {
                     anyhow::anyhow!("No URL provided. Pass a URL, or a list of URLs with --file <path>.")
                 })?;
-                run_fetch(&url, dump, selector, wait, timeout, &wait_until, user_agent, stealth, eval, output, quiet, global_proxy, storage_dir, args.allow_private_network).await?;
+                run_fetch(&url, dump, selector, wait, timeout, &wait_until, user_agent, stealth, eval, output, quiet, global_proxy, storage_dir, args.allow_private_network, args.insecure).await?;
             }
         }
         Some(Command::Scrape { urls, eval, concurrency, format, timeout, quiet }) => {
@@ -391,9 +399,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Mcp { http, host, port, proxy, user_agent }) => {
             let mcp_proxy = merge_proxy(global_proxy.clone(), proxy);
             if http {
-                obscura_mcp::http::run(host, port, mcp_proxy, user_agent, stealth).await?;
+                obscura_mcp::http::run(host, port, mcp_proxy, user_agent, stealth, args.insecure).await?;
             } else {
-                obscura_mcp::run(mcp_proxy, user_agent, stealth).await?;
+                obscura_mcp::run(mcp_proxy, user_agent, stealth, args.insecure).await?;
             }
         }
         None => {
@@ -559,6 +567,7 @@ async fn run_fetch(
     proxy: Option<String>,
     storage_dir: Option<std::path::PathBuf>,
     allow_private_network: bool,
+    accept_invalid_certs: bool,
 ) -> anyhow::Result<()> {
     // Whether the user explicitly passed --dump. With --eval also present this
     // decides whether we return the eval value or read the page after the
@@ -576,6 +585,7 @@ async fn run_fetch(
             proxy,
             user_agent.clone(),
             timeout_secs,
+            accept_invalid_certs,
         )
         .await?;
         write_or_print_bytes(&bytes, output.as_ref()).await?;
@@ -589,6 +599,7 @@ async fn run_fetch(
         user_agent.clone(),
         storage_dir.clone(),
         allow_private_network,
+        accept_invalid_certs,
     ));
     let mut page = Page::new("fetch-page".to_string(), context.clone());
 
@@ -694,6 +705,7 @@ async fn fetch_original_response(
     proxy: Option<String>,
     user_agent: Option<String>,
     timeout_secs: u64,
+    accept_invalid_certs: bool,
 ) -> anyhow::Result<obscura_net::Response> {
     let url = url::Url::parse(url_str)
         .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
@@ -701,6 +713,7 @@ async fn fetch_original_response(
     let client = obscura_net::ObscuraHttpClient::with_options(
         Arc::new(obscura_net::CookieJar::new()),
         proxy.as_deref(),
+        accept_invalid_certs,
     );
     if let Some(ua) = user_agent {
         client.set_user_agent(&ua).await;
@@ -718,8 +731,9 @@ async fn fetch_original_bytes(
     proxy: Option<String>,
     user_agent: Option<String>,
     timeout_secs: u64,
+    accept_invalid_certs: bool,
 ) -> anyhow::Result<Vec<u8>> {
-    Ok(fetch_original_response(url_str, proxy, user_agent, timeout_secs).await?.body)
+    Ok(fetch_original_response(url_str, proxy, user_agent, timeout_secs, accept_invalid_certs).await?.body)
 }
 
 /// Read newline-delimited URLs from `path` (or stdin when `path` is `-`).
@@ -758,6 +772,7 @@ async fn run_batch_fetch(
     proxy: Option<String>,
     output: Option<std::path::PathBuf>,
     quiet: bool,
+    accept_invalid_certs: bool,
 ) -> anyhow::Result<()> {
     let total = urls.len();
     if total == 0 {
@@ -786,7 +801,7 @@ async fn run_batch_fetch(
             let _permit = sem.acquire().await.unwrap();
             let task_start = Instant::now();
             let result =
-                fetch_original_response(&url, (*proxy).clone(), (*user_agent).clone(), timeout_secs)
+                fetch_original_response(&url, (*proxy).clone(), (*user_agent).clone(), timeout_secs, accept_invalid_certs)
                     .await;
             let elapsed_ms = task_start.elapsed().as_millis();
 
@@ -1532,7 +1547,7 @@ mod tests {
             .expect("seed temp PNG fixture");
 
         let file_url = format!("file://{}", path.display());
-        let bytes = fetch_original_bytes(&file_url, None, None, 5)
+        let bytes = fetch_original_bytes(&file_url, None, None, 5, false)
             .await
             .expect("fetch_original_bytes should round-trip the file body");
 

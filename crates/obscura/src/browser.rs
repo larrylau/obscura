@@ -29,6 +29,7 @@ impl Browser {
                 config.stealth,
                 config.user_agent,
                 Some(dir.clone()),
+                config.accept_invalid_certs,
             )
         } else {
             BrowserContext::with_full_options(
@@ -36,6 +37,7 @@ impl Browser {
                 config.proxy,
                 config.stealth,
                 config.user_agent,
+                config.accept_invalid_certs,
             )
         };
 
@@ -86,6 +88,10 @@ impl BrowserBuilder {
     }
     pub fn storage_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.config.storage_dir = Some(dir.into());
+        self
+    }
+    pub fn accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.config.accept_invalid_certs = accept;
         self
     }
     pub fn build(self) -> Result<Browser, Error> {

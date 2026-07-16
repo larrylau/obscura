@@ -10,6 +10,8 @@ pub struct BrowserConfig {
     pub user_agent: Option<String>,
     /// Directory for persistent cookie storage
     pub storage_dir: Option<PathBuf>,
+    /// Accept invalid TLS certificates (self-signed, expired, etc)
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for BrowserConfig {
@@ -19,6 +21,7 @@ impl Default for BrowserConfig {
             stealth: false,
             user_agent: None,
             storage_dir: None,
+            accept_invalid_certs: false,
         }
     }
 }
@@ -52,6 +55,11 @@ impl BrowserConfigBuilder {
 
     pub fn storage_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.config.storage_dir = Some(dir.into());
+        self
+    }
+
+    pub fn accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.config.accept_invalid_certs = accept;
         self
     }
 

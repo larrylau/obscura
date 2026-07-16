@@ -276,6 +276,10 @@ pub struct ObscuraHttpClient {
     /// through in addition to the `OBSCURA_ALLOW_PRIVATE_NETWORK` env var.
     /// Set via `--allow-private-network` on the CLI (issue #33).
     pub allow_private_network: bool,
+    /// When true, accept invalid TLS certificates (self-signed, expired, etc).
+    /// Set via `--insecure` on the CLI. WARNING: This disables certificate
+    /// validation and exposes connections to man-in-the-middle attacks.
+    pub accept_invalid_certs: bool,
 }
 
 /// Derive the sec-ch-ua and sec-ch-ua-platform client-hint header values from a
@@ -324,17 +328,18 @@ impl ObscuraHttpClient {
     }
 
     pub fn with_cookie_jar(cookie_jar: Arc<CookieJar>) -> Self {
-        Self::with_options(cookie_jar, None)
+        Self::with_options(cookie_jar, None, false)
     }
 
-    pub fn with_options(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
-        Self::with_full_options(cookie_jar, proxy_url, false)
+    pub fn with_options(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>, accept_invalid_certs: bool) -> Self {
+        Self::with_full_options(cookie_jar, proxy_url, false, accept_invalid_certs)
     }
 
     pub fn with_full_options(
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
         allow_private_network: bool,
+        accept_invalid_certs: bool,
     ) -> Self {
         ObscuraHttpClient {
             client: tokio::sync::OnceCell::new(),
@@ -352,6 +357,7 @@ impl ObscuraHttpClient {
             timeout: Duration::from_secs(30),
             block_trackers: false,
             allow_private_network,
+            accept_invalid_certs,
         }
     }
 
@@ -360,7 +366,7 @@ impl ObscuraHttpClient {
             let mut builder = Client::builder()
                 .redirect(Policy::none())
                 .timeout(Duration::from_secs(30))
-                .danger_accept_invalid_certs(false)
+                .danger_accept_invalid_certs(self.accept_invalid_certs)
                 // SSRF guard: reject hostnames that resolve to a private/loopback IP.
                 .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
 ;
