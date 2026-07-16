@@ -1,0 +1,91 @@
+name: Build Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-msvc
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+        if: |
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+
+      - name: Build
+        if: |
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build stealth
+        if: |
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+        run: cargo build --release --target ${{ matrix.target }} --features stealth
+        continue-on-error: true
+
+      - name: Smoke test (V8 snapshot)
+        if: |
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+        shell: bash
+        run: |
+          BIN=target/${{ matrix.target }}/release/obscura
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          "$BIN" fetch "data:text/html,<title>ok</title>" --eval "1+1"
+
+      - name: Upload artifact (Unix)
+        if: |
+          runner.os != 'Windows' &&
+          (github.event.inputs.target == 'all' || github.event.inputs.target == matrix.target)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obscura-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/obscura
+            target/${{ matrix.target }}/release/obscura-worker
+
+      - name: Upload artifact (Windows)
+        if: |
+          runner.os == 'Windows' &&
+          (github.event.inputs.target == 'all' || github.event.inputs.target == matrix.target)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obscura-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/obscura.exe
+            target/${{ matrix.target }}/release/obscura-worker.exe
