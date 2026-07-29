@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <strong>The open-source headless browser for AI agents and web scraping.</strong><br>
+  <strong>The open-source headless browser for AI agents and web scraping, with built-in support for self-signed certificates via `--insecure`.</strong><br>
   Lightweight, stealthy, and built in Rust.
 </p>
 
