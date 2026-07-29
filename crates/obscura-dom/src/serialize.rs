@@ -21,8 +21,21 @@ impl DomTree {
 
     pub fn inner_html(&self, node_id: NodeId) -> String {
         let mut buf = String::new();
-        self.serialize_worklist(self.child_work(node_id), &mut buf);
+        self.serialize_worklist(self.child_work(self.content_source(node_id)), &mut buf);
         buf
+    }
+
+    // The node whose children represent `node_id`'s markup. For a <template>
+    // that is its contents document, since the parser puts template children
+    // there rather than under the element (issue #463); for everything else it
+    // is the node itself.
+    fn content_source(&self, node_id: NodeId) -> NodeId {
+        self.with_node(node_id, |n| match &n.data {
+            NodeData::Element { template_contents: Some(contents), .. } => Some(*contents),
+            _ => None,
+        })
+        .flatten()
+        .unwrap_or(node_id)
     }
 
     // Children as work items in document order (top of the LIFO stack first).
@@ -79,7 +92,7 @@ impl DomTree {
                     buf.push_str(name);
                     buf.push('>');
                 }
-                NodeData::Element { name, attrs, .. } => {
+                NodeData::Element { name, attrs, template_contents, .. } => {
                     let tag = name.local.as_ref();
                     if include_self {
                         buf.push('<');
@@ -101,7 +114,12 @@ impl DomTree {
                         if include_self {
                             stack.push(SerializeWork::CloseTag(tag.to_string()));
                         }
-                        for w in self.child_work(node_id) {
+                        // A <template> serializes its contents document, not its
+                        // own (always empty) children (issue #463). template_contents
+                        // is already in hand from this node, so read it directly
+                        // rather than re-fetching and cloning the node.
+                        let source = template_contents.unwrap_or(node_id);
+                        for w in self.child_work(source) {
                             stack.push(w);
                         }
                     }

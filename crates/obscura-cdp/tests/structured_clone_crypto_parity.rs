@@ -183,6 +183,72 @@ async fn structured_clone_preserves_dataview() {
     assert_eq!(val["independent"], true, "clone must own its buffer, not alias the source");
 }
 
+// A reference cycle through Error.cause must clone without crashing (issue
+// #419). The Error branch recursed into `cause` before recording itself in
+// `seen`, so a self-referential cause blew the stack. Chrome clones this and
+// preserves identity (clone.cause === clone).
+#[tokio::test(flavor = "current_thread")]
+async fn structured_clone_handles_circular_error_cause() {
+    let (mut ctx, sid) = setup().await;
+    let v = eval(
+        &mut ctx,
+        2,
+        r#"(async () => {
+            const e = new Error("boom");
+            e.cause = e;
+            const out = {};
+            try {
+                const clone = structuredClone(e);
+                out.ok = true;
+                out.message = clone.message;
+                out.selfCycle = clone.cause === clone;
+                out.isError = clone instanceof Error;
+            } catch (err) {
+                out.ok = false;
+                out.err = String(err && err.message || err);
+            }
+            return JSON.stringify(out);
+        })()"#,
+        &sid,
+    )
+    .await;
+    let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
+    assert_eq!(val["ok"], true, "circular Error.cause crashed structuredClone: {:?}", val["err"]);
+    assert_eq!(val["message"], "boom");
+    assert_eq!(val["isError"], true, "clone must remain an Error");
+    assert_eq!(val["selfCycle"], true, "cyclic cause must resolve to the clone, not a duplicate");
+}
+
+// An own enumerable `__proto__` data property (what JSON.parse('{"__proto__":…}')
+// produces) must clone as an own data property, not be routed through the
+// inherited __proto__ setter (issue #420). Plain objects must also clone onto
+// Object.prototype, matching Chrome, rather than inheriting the source proto.
+#[tokio::test(flavor = "current_thread")]
+async fn structured_clone_reproduces_own_proto_property() {
+    let (mut ctx, sid) = setup().await;
+    let v = eval(
+        &mut ctx,
+        2,
+        r#"(async () => {
+            const src = JSON.parse('{"__proto__":{"polluted":true},"a":1}');
+            const clone = structuredClone(src);
+            return JSON.stringify({
+                hasOwnProto: Object.prototype.hasOwnProperty.call(clone, "__proto__"),
+                plainProto: Object.getPrototypeOf(clone) === Object.prototype,
+                polluted: clone.polluted === true,
+                a: clone.a,
+            });
+        })()"#,
+        &sid,
+    )
+    .await;
+    let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
+    assert_eq!(val["hasOwnProto"], true, "own __proto__ data property was lost");
+    assert_eq!(val["plainProto"], true, "plain object must clone onto Object.prototype");
+    assert_eq!(val["polluted"], false, "clone prototype was reparented via the __proto__ setter");
+    assert_eq!(val["a"], 1);
+}
+
 // Functions and symbols are not structured-cloneable. The original early
 // `typeof !== "object"` return passed them through by reference instead of
 // throwing DataCloneError, so this guards both the throw and the name.
@@ -206,4 +272,39 @@ async fn structured_clone_rejects_functions_and_symbols() {
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
     assert_eq!(val["fn"], "DataCloneError", "functions must not clone");
     assert_eq!(val["sym"], "DataCloneError", "symbols must not clone");
+}
+
+// structuredClone preserves reference identity within one graph, including for
+// platform objects cloned through a hook (issue #423). The CryptoKey hook
+// ignored the `seen` map _structuredClone hands it, so one key referenced twice
+// came back as two distinct objects.
+#[tokio::test(flavor = "current_thread")]
+async fn structured_clone_preserves_cryptokey_identity() {
+    let (mut ctx, sid) = setup().await;
+    let v = eval(
+        &mut ctx,
+        2,
+        r#"(async () => {
+            const key = await crypto.subtle.importKey(
+                "raw", new Uint8Array(32),
+                { name: "HMAC", hash: "SHA-256" }, true, ["sign"]
+            );
+            const clone = structuredClone({ a: key, b: key });
+            // The shared clone must still be usable by crypto.subtle.
+            const sig = await crypto.subtle.sign("HMAC", clone.a, new TextEncoder().encode("abc"));
+            return JSON.stringify({
+                shared: clone.a === clone.b,
+                distinctFromSource: clone.a !== key,
+                tag: clone.a[Symbol.toStringTag],
+                sigLen: new Uint8Array(sig).length,
+            });
+        })()"#,
+        &sid,
+    )
+    .await;
+    let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
+    assert_eq!(val["shared"], true, "one CryptoKey reached twice must clone to one shared object");
+    assert_eq!(val["distinctFromSource"], true, "clone must not alias the source key");
+    assert_eq!(val["tag"], "CryptoKey");
+    assert_eq!(val["sigLen"], 32, "the shared clone must remain usable by crypto.subtle");
 }

@@ -73,6 +73,22 @@ Want to sponsor? Email [hello@obscura.sh](mailto:hello@obscura.sh).
       Stable proxies. Fewer blocks. Most reliable Obscura automation.
     </td>
   </tr>
+   <tr>
+    <td width="200" align="center" valign="middle">
+      <a href="https://go.nodemaven.com/obscura" target="_blank">
+        <img alt="NodeMaven" src="assets/sponsors/nodemaven.svg" width="180"/>
+      </a>
+    </td>
+    <td valign="middle">
+      <a href="https://go.nodemaven.com/obscuraread"><b>NodeMaven</b></a> — the most reliable proxy provider with the highest quality IPs on the market. Built for automation, web scraping, SEO research, and social media management.<br><br>
+      <b>99.9% uptime<br>
+      Sticky sessions up to 7 days<br>
+      IP filtering on every proxy<br>
+      No KYC required<br>
+      Cashback on traffic — earn up to 10% back<br><br></b>
+      🎁 Use code <b>OBSCURA35</b> for 35% off Mobile & Residential, or <b>OBSCURA40</b> for 40% off ISP (Static) proxies.
+    </td>
+  </tr>
   <tr>
     <td width="200" align="center" valign="middle">
       <a href="https://proxyempire.io/?ref=obscura&utm_source=obscuragithub" target="_blank">
@@ -91,18 +107,6 @@ Want to sponsor? Email [hello@obscura.sh](mailto:hello@obscura.sh).
       Better proxies. Fewer blocks. More scalable automation.
     </td>
   </tr>
-  <tr>
-    <td width="200" align="center" valign="middle">
-      <a href="https://mangoproxy.com/?utm_source=github&utm_medium=partner&utm_campaign=h4ckf0r0day" target="_blank">
-        <img alt="MangoProxy" src="assets/sponsors/mangoproxy.png" width="180"/>
-      </a>
-    </td>
-    <td valign="middle">
-      <a href="https://mangoproxy.com/?utm_source=github&utm_medium=partner&utm_campaign=h4ckf0r0day"><b>MangoProxy</b></a> provides residential, ISP, datacenter, and mobile proxies in 200+ countries. Trusted by businesses worldwide for stable connections, fast response times, and scalable proxy infrastructure.<br>
-      Use Promo code <b>OBSCURA</b> for 8% off Static ISP Proxies.
-    </td>
-  </tr>
-    <tr>
       <td width="200" align="center" valign="middle">
         <a href="https://9proxy.com/?utm_source=Github&utm_campaign=obscura" target="_blank">
           <img alt="9Proxy" src="assets/sponsors/9proxy.png" width="180"/>
@@ -113,22 +117,6 @@ Want to sponsor? Email [hello@obscura.sh](mailto:hello@obscura.sh).
   just $0.018/IP or $0.68/GB. 20M+ IPs across 90+ countries. Sticky or rotating sessions, managed from desktop or mobile app.
       </td>
     </tr>
-  <tr>
-    <td width="200" align="center" valign="middle">
-      <a href="https://go.nodemaven.com/obscura" target="_blank">
-        <img alt="NodeMaven" src="assets/sponsors/nodemaven.svg" width="180"/>
-      </a>
-    </td>
-    <td valign="middle">
-      <a href="https://go.nodemaven.com/obscura"><b>NodeMaven</b></a> — the most reliable proxy provider with the highest quality IPs on the market. Built for automation, web scraping, SEO research, and social media management.<br><br>
-      <b>99.9% uptime<br>
-      Sticky sessions up to 7 days<br>
-      IP filtering on every proxy<br>
-      No KYC required<br>
-      Cashback on traffic — earn up to 10% back<br><br></b>
-      🎁 Use code <b>OBSCURA35</b> for 35% off Mobile & Residential, or <b>OBSCURA40</b> for 40% off ISP (Static) proxies.
-    </td>
-  </tr>
   <tr>
     <td width="200" align="center" valign="middle">
       <a href="https://www.rapidproxy.io/?ref=obscura" target="_blank">
@@ -142,6 +130,26 @@ Want to sponsor? Email [hello@obscura.sh](mailto:hello@obscura.sh).
       Supports HTTP / HTTPS / SOCKS5 protocols<br>
       High-speed, low-latency network built for scale<br><br>
       🎁 Use discount code <b>RAPID10</b> to get <b>10% off</b>.<br><br></b>
+    </td>
+  </tr>
+  <tr>
+    <td width="200" align="center" valign="middle">
+      <a href="https://www.thordata.com/?ls=dob&lk=dob" target="_blank">
+        <img alt="Thordata" src="/assets/sponsors/thordatalogo.png" width="180"/>
+      </a>
+    </td>
+    <td valign="middle">
+      🚀 <b>Obscura × Thordata</b><br>
+      Need more stable proxies for automation, public web scraping, SEO, or ad verification? Power your workflow with <a href="https://www.thordata.com/?ls=dob&lk=dob"><b>Thordata</b></a>.<br><br>
+      <b>🌍 Residential Proxies: 100M+ real residential IPs in 190+ countries<br>
+      ♾️ Unlimited Proxies: for heavy traffic and high concurrency<br>
+      ✨ Recently upgraded residential IP pool<br>
+      ✨ Unlimited Concurrent Sessions<br>
+      🔁 Rotating & Sticky Sessions<br>
+      📍 Flexible GEO targeting<br>
+      ⚡ Stable HTTP(S) connections<br><br>
+      🎁 Use code <b>obscura</b> for <b>10% off</b>.<br><br></b>
+      Get started with a 3-day free trial and test Thordata with your own workflow.
     </td>
   </tr>
 </table>
@@ -181,6 +189,10 @@ No Chrome, no Node.js, no dependencies. Release archives include both
 `obscura` and `obscura-worker`; keep them in the same directory for the
 parallel `scrape` command.
 
+Default archive names contain the lean binary. Archives ending in
+`-stealth.tar.gz` or `-stealth.zip` additionally include the wreq/BoringSSL
+transport used for TLS impersonation.
+
 Linux release builds target Ubuntu 22.04 so the downloaded binary remains
 usable on common LTS servers with glibc 2.35+.
 
@@ -204,6 +216,14 @@ cargo build --release --features stealth
 ```
 
 Requires Rust 1.75+ ([rustup.rs](https://rustup.rs)). First build takes ~5 min (V8 compiles from source, cached after).
+The stealth build also compiles BoringSSL and generates bindings, so it needs
+CMake, Clang, and the libclang/LLVM development libraries. On Ubuntu/Debian:
+
+```bash
+sudo apt-get install build-essential cmake clang libclang-dev llvm-dev
+```
+
+The default build does not require these additional stealth dependencies.
 
 ## Quick Start
 

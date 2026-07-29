@@ -8,7 +8,7 @@ use deno_core::OpState;
 use deno_core::Extension;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use obscura_dom::{DomTree, NodeData, NodeId};
-use obscura_net::{CookieJar, ObscuraHttpClient, RequestInfo, ResourceType, Response};
+use obscura_net::{CallbackRegistry, CookieJar, ObscuraHttpClient, RequestInfo, ResourceType, Response};
 #[cfg(feature = "stealth")]
 use obscura_net::StealthHttpClient;
 use tokio::sync::Mutex;
@@ -75,6 +75,10 @@ pub struct ObscuraState {
     pub blocked_urls: Vec<String>,
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<ObscuraHttpClient>>,
+    /// The owning page's passive on_request/on_response callbacks (issue
+    /// #408). Page-scoped, so scripted fetch()/XHR observation stays local to
+    /// the page that registered it.
+    pub callbacks: Option<Arc<CallbackRegistry>>,
     /// When set (stealth mode), scripted fetch()/XHR is routed through the wreq
     /// client so the request carries the Chrome TLS fingerprint and client
     /// hints instead of the rustls ClientHello op_fetch_url would otherwise send.
@@ -114,6 +118,7 @@ impl ObscuraState {
             blocked_urls: Vec::new(),
             cookie_jar: None,
             http_client: None,
+            callbacks: None,
             #[cfg(feature = "stealth")]
             stealth_client: None,
             pending_navigation: None,
@@ -267,6 +272,31 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 "prev_sibling" => n.prev_sibling, _ => None,
             }).flatten().map(|id| id.index().to_string()).unwrap_or("-1".into())
         }
+        "next_in_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.next_in_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        // Reverse document order within a subtree, for NodeIterator's backward
+        // walk (which prunes nothing, so the whole step fits in the DOM layer).
+        "prev_in_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.prev_in_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
+        // Step past a whole subtree rather than into it: NodeFilter.FILTER_REJECT
+        // prunes the rejected node's descendants, unlike FILTER_SKIP.
+        "next_after_subtree" => {
+            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            dom.next_after_subtree(root, current)
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
+        }
         "child_nodes" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let ids: Vec<i32> = dom.children(NodeId::new(nid)).iter().map(|id| id.index() as i32).collect();
@@ -276,6 +306,14 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
             let nid = arg1.parse::<u32>().unwrap_or(0);
             let name = dom.with_node(NodeId::new(nid), |n| n.as_element().map(|name| name.local.as_ref().to_ascii_uppercase())).flatten().unwrap_or_default();
             serde_json::to_string(&name).unwrap_or("\"\"".into())
+        }
+        // The tree builder already assigns foreign content (an <svg>/<math>
+        // subtree) its own namespace; expose it so JS does not have to guess
+        // the namespace from the tag name.
+        "namespace_uri" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let ns = dom.with_node(NodeId::new(nid), |n| n.as_element().map(|name| name.ns.as_ref().to_string())).flatten().unwrap_or_default();
+            serde_json::to_string(&ns).unwrap_or("\"\"".into())
         }
         "get_attribute" => {
             let nid = arg1.parse::<u32>().unwrap_or(0);
@@ -374,6 +412,15 @@ fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> Str
                 }
             });
             "true".into()
+        }
+        // A <template>'s children live in a separate contents document, so this
+        // is the only route to them from JS. Allocates one on demand for
+        // templates built via createElement.
+        "template_contents" => {
+            let nid = arg1.parse::<u32>().unwrap_or(0);
+            dom.template_contents(NodeId::new(nid))
+                .map(|id| id.index().to_string())
+                .unwrap_or("-1".into())
         }
         "create_document_fragment" => {
             dom.new_node(NodeData::Document).index().to_string()
@@ -535,21 +582,9 @@ fn op_console_msg(state: &OpState, #[string] level: &str, #[string] msg: &str) {
     }
 }
 
-// op_fetch_url backs JS-level `fetch()` and XHR. Pre-#139 it used a
-// process-wide `OnceLock<reqwest::Client>` initialised with no proxy, so
-// every JS network call bypassed the configured upstream proxy. We now
-// build a client per request, threading whatever `proxy_url` the page's
-// ObscuraHttpClient was configured with.
-//
-// The per-request build cost is negligible (≪1ms) compared with the actual
-// Process-wide cache keyed by proxy URL and insecure flag. Previously we built a fresh
-// reqwest::Client on every op_fetch_url call (every JS fetch(), XHR,
-// dynamic script load). Each build re-initialised TLS roots and a
-// fresh connection pool with zero reuse, costing ~5ms per fetch on top
-// of any real network work. On an asset-heavy page with 30+ subresources
-// that adds ~150ms of pure waste. With the cache, the first fetch on a
-// given proxy pays the build cost once and every subsequent fetch reuses
-// the same connection pool.
+// Fallback cache for runtimes that have no owning ObscuraHttpClient, such as
+// a standalone module loader. Browser pages use their context-scoped client
+// below so sequential V8 runtimes never share an async network pool (#453).
 static FETCH_CLIENT_CACHE: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, reqwest::Client>>,
 > = std::sync::OnceLock::new();
@@ -588,13 +623,9 @@ fn build_request_client(proxy_url: Option<&str>, accept_invalid_certs: bool) -> 
     // send().await errors, which op_fetch_url propagates and the fetch shim turns
     // into an XHR `error`/`loadend`. 30s matches the other clients in the
     // workspace; OBSCURA_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
-    let timeout_ms: u64 = std::env::var("OBSCURA_FETCH_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30_000);
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .timeout(fetch_timeout())
         .danger_accept_invalid_certs(accept_invalid_certs)
         // SSRF guard: also reject hostnames that resolve to a private/loopback IP.
         .dns_resolver(std::sync::Arc::new(obscura_net::SsrfGuardResolver::new(false)))
@@ -612,6 +643,14 @@ fn build_request_client(proxy_url: Option<&str>, accept_invalid_certs: bool) -> 
     builder
         .build()
         .map_err(|e| format!("failed to build reqwest::Client: {}", e))
+}
+
+fn fetch_timeout() -> std::time::Duration {
+    let timeout_ms = std::env::var("OBSCURA_FETCH_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30_000);
+    std::time::Duration::from_millis(timeout_ms)
 }
 
 /// Cap on the number of redirect hops op_fetch_url will follow.
@@ -644,7 +683,7 @@ async fn op_fetch_url(
         }
     }
 
-    let (cookie_jar, in_flight, intercept_tx, proxy_url, http_client, accept_invalid_certs) = {
+let (cookie_jar, in_flight, intercept_tx, proxy_url, callbacks, http_client, accept_invalid_certs) = {
         let state_borrow = state.borrow();
         let gs = state_borrow.borrow::<SharedState>().clone();
         let mut gs = gs.borrow_mut();
@@ -677,7 +716,15 @@ async fn op_fetch_url(
         } else {
             None
         };
-        (jar, in_flight, itx, proxy_url, gs.http_client.clone(), accept_invalid_certs)
+(
+            jar,
+            in_flight,
+            itx,
+            proxy_url,
+            gs.callbacks.clone(),
+            gs.http_client.clone(),
+            accept_invalid_certs,
+        )
     };
 
     // Slots the interception channel can override via Continue so a consumer
@@ -760,8 +807,11 @@ async fn op_fetch_url(
     let method = override_method.unwrap_or(method);
     let body = override_body.unwrap_or(body);
 
-    let client = cached_request_client(proxy_url.as_deref(), accept_invalid_certs)
-        .map_err(deno_error::JsErrorBox::generic)?;
+let client = match &http_client {
+        Some(client) => client.request_client().await,
+        None => cached_request_client(proxy_url.as_deref(), accept_invalid_certs)
+            .map_err(deno_error::JsErrorBox::generic)?,
+    };
 
     let request_origin = url::Url::parse(&url)
         .ok()
@@ -785,9 +835,8 @@ async fn op_fetch_url(
     // reaches the network (Fulfill/Fail from the interception channel short-
     // circuit earlier). on_request/on_response previously fired only for
     // navigation; this wires them for JS fetch()/XHR too.
-    if let Some(ref hc) = http_client {
-        let cbs = hc.on_request.read().await;
-        if !cbs.is_empty() {
+    if let Some(ref cbs) = callbacks {
+        if cbs.has_request_callbacks().await {
             if let Ok(parsed) = url::Url::parse(&url) {
                 let info = RequestInfo {
                     url: parsed,
@@ -795,9 +844,7 @@ async fn op_fetch_url(
                     headers: custom_headers.clone(),
                     resource_type: ResourceType::Fetch,
                 };
-                for (_, cb) in cbs.iter() {
-                    cb(&info);
-                }
+                cbs.fire_request(&info).await;
             }
         }
     }
@@ -825,7 +872,7 @@ async fn op_fetch_url(
                 page_origin.clone(),
                 is_cross_origin,
                 mode.clone(),
-                http_client.clone(),
+                callbacks.clone(),
             )
             .await;
         }
@@ -845,6 +892,7 @@ async fn op_fetch_url(
     if needs_preflight {
         let preflight = client
             .request(reqwest::Method::OPTIONS, &url)
+            .timeout(fetch_timeout())
             .header("Origin", &page_origin)
             .header("Access-Control-Request-Method", method.as_str())
             .header(
@@ -878,7 +926,9 @@ async fn op_fetch_url(
     let mut current_body = body;
     let mut redirects_followed: usize = 0;
     let response = loop {
-        let mut req = client.request(current_method.clone(), &current_url);
+        let mut req = client
+            .request(current_method.clone(), &current_url)
+            .timeout(fetch_timeout());
 
         if is_cross_origin {
             req = req.header("Origin", &page_origin);
@@ -1031,9 +1081,8 @@ async fn op_fetch_url(
         .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref hc) = http_client {
-        let cbs = hc.on_response.read().await;
-        if !cbs.is_empty() {
+    if let Some(ref cbs) = callbacks {
+        if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.to_vec());
             let info = RequestInfo {
                 url: resp.url.clone(),
@@ -1041,9 +1090,7 @@ async fn op_fetch_url(
                 headers: resp_headers.clone(),
                 resource_type: ResourceType::Fetch,
             };
-            for (_, cb) in cbs.iter() {
-                cb(&info, &resp);
-            }
+            cbs.fire_response(&info, &resp).await;
         }
     }
     let response_request_id = {
@@ -1136,7 +1183,7 @@ async fn stealth_fetch_all(
     page_origin: String,
     is_cross_origin: bool,
     mode: String,
-    http_client: Option<Arc<ObscuraHttpClient>>,
+    callbacks: Option<Arc<CallbackRegistry>>,
 ) -> Result<String, deno_error::JsErrorBox> {
     let mut current_url = url.clone();
     let mut current_method = method;
@@ -1224,9 +1271,8 @@ async fn stealth_fetch_all(
 
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref hc) = http_client {
-        let cbs = hc.on_response.read().await;
-        if !cbs.is_empty() {
+    if let Some(ref cbs) = callbacks {
+        if cbs.has_response_callbacks().await {
             let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.clone());
             let info = RequestInfo {
                 url: resp.url.clone(),
@@ -1234,9 +1280,7 @@ async fn stealth_fetch_all(
                 headers: resp_headers.clone(),
                 resource_type: ResourceType::Fetch,
             };
-            for (_, cb) in cbs.iter() {
-                cb(&info, &resp);
-            }
+            cbs.fire_response(&info, &resp).await;
         }
     }
 

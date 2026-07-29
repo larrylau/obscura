@@ -663,6 +663,11 @@ class Node {
   get previousSibling() { return _wrap(+_dom("prev_sibling", this._nid)); }
   appendChild(c) {
     if (!c) return c;
+    if (c instanceof DocumentFragment) {
+      const children = Array.from(c.childNodes);
+      for (const child of children) this.appendChild(child);
+      return c;
+    }
     _dom("append_child", this._nid, c._nid);
     if (globalThis.__mutationObservers?.length) globalThis.__notifyMutation('childList', this._nid, [c._nid], []);
     if (c instanceof Element && c.tagName === 'SCRIPT') {
@@ -745,6 +750,12 @@ class Node {
   }
   replaceChild(newChild, oldChild) {
     if (!oldChild || !newChild) return oldChild;
+    if (newChild instanceof DocumentFragment) {
+      const children = Array.from(newChild.childNodes);
+      for (const child of children) this.insertBefore(child, oldChild);
+      this.removeChild(oldChild);
+      return oldChild;
+    }
     _dom("insert_before", newChild._nid, oldChild._nid);
     _dom("remove_child", oldChild._nid);
     return oldChild;
@@ -752,6 +763,11 @@ class Node {
   insertBefore(n, ref) {
     if (!n) return n;
     if (!ref) { this.appendChild(n); return n; }
+    if (n instanceof DocumentFragment) {
+      const children = Array.from(n.childNodes);
+      for (const child of children) this.insertBefore(child, ref);
+      return n;
+    }
     _dom("insert_before", n._nid, ref._nid);
     return n;
   }
@@ -1150,6 +1166,17 @@ function _htmlAttrName(el, n) {
   return n;
 }
 
+// A submit button per the HTML spec: a <button> whose type is submit — the
+// default, including when the type attribute is missing or invalid — or an
+// <input> of type submit/image. Used to validate requestSubmit's submitter.
+function _isSubmitButton(el) {
+  if (!el || typeof el.localName !== "string") return false;
+  const type = ((el.getAttribute && el.getAttribute("type")) || "").toLowerCase();
+  if (el.localName === "button") return type !== "reset" && type !== "button";
+  if (el.localName === "input") return type === "submit" || type === "image";
+  return false;
+}
+
 class Element extends Node {
   constructor(nid) {
     super(nid);
@@ -1183,12 +1210,24 @@ class Element extends Node {
   set className(v) { this.setAttribute("class", v); }
   get namespaceURI() {
     // createElementNS records the requested namespace on _ns; an empty string
-    // maps to the null namespace per spec. Elements made via createElement (or
-    // parsed) have no _ns: default to XHTML, except <svg> which is SVG.
+    // maps to the null namespace per spec.
     if (this._ns !== undefined) return this._ns === "" ? null : this._ns;
-    if (this.localName === "svg") return "http://www.w3.org/2000/svg";
-    return "http://www.w3.org/1999/xhtml";
+    // Otherwise use the namespace the HTML tree builder assigned. Foreign
+    // content puts the WHOLE <svg>/<math> subtree in that namespace, not just
+    // the root, so deriving it from the tag name (the old `localName === "svg"`
+    // check) left every descendant looking like HTML and skipped the SVG-only
+    // reflections -- notably `get href()`, which then returned a plain string
+    // instead of an SVGAnimatedString. An element's namespace never changes,
+    // so cache it like _lname.
+    if (this._nsCache !== undefined) return this._nsCache;
+    let ns = _domParse("namespace_uri", this._nid) || "";
+    // Nodes with no element name recorded fall back to the previous heuristic.
+    if (!ns) ns = this.localName === "svg" ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml";
+    this._nsCache = ns;
+    return ns;
   }
+  // `inner_html` resolves a <template> to its contents document on the Rust
+  // side (issue #463), so this needs no template special case.
   get innerHTML() { return _domParse("inner_html", this._nid) ?? ""; }
   set innerHTML(v) {
     if (this.localName === 'template') {
@@ -1227,6 +1266,18 @@ class Element extends Node {
     // infinite retry loop (issue #210).
     const tag = this.localName;
     if (tag === 'template') {
+      // Back the fragment with the node's real template contents (issue #463).
+      // The parser stores template children in a separate contents document
+      // instead of under the element, so without this the getter handed back a
+      // fabricated empty fragment and the parsed markup was unreachable.
+      // `template_contents` allocates one on demand for created templates.
+      const nid = +_dom("template_contents", this._nid);
+      if (nid >= 0) {
+        // Cache by node id so `.content` keeps a stable identity across reads —
+        // frameworks stash the fragment and compare it later.
+        if (!_cache.has(nid)) _cache.set(nid, new DocumentFragment(nid));
+        return _cache.get(nid);
+      }
       if (!this._templateContent) this._templateContent = document.createDocumentFragment();
       return this._templateContent;
     }
@@ -1501,8 +1552,11 @@ class Element extends Node {
           return;
         }
       }
-      const type = (this.getAttribute('type') || '').toLowerCase();
-      if (type === 'submit' || (this.localName === 'button' && type !== 'button' && type !== 'reset')) {
+      // Same predicate requestSubmit validates against, so an internal click
+      // can never hand it a submitter it would reject. Also matches the CDP
+      // click path in input.rs, which already treats <input type=image> as a
+      // submit button.
+      if (_isSubmitButton(this)) {
         const form = this.closest ? this.closest('form') : null;
         // A real submit-button click fires the cancelable submit event, so use
         // requestSubmit() (not the plain submit() method, which now bypasses it).
@@ -1899,17 +1953,15 @@ class Element extends Node {
         el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
       }
 
-      if (typeof el.onload === 'function') {
-        try { el.onload(); } catch(e) {}
-      } else {
-        var onloadAttr = el.getAttribute('onload');
-        if (onloadAttr) try { (0, eval)(onloadAttr); } catch(e) {}
-      }
+      // Dispatch through the element so the onload property/attribute and any
+      // addEventListener('load', ...) listeners all run. Calling el.onload()
+      // directly bypasses listeners registered via addEventListener.
+      el.dispatchEvent(new Event('load'));
     }).catch(() => {
       el._iframeDoc = new _IframeDocument('<!DOCTYPE html><html><head></head><body></body></html>', fullUrl, el);
       el._iframeWin = new _IframeWindow(el._iframeDoc, fullUrl);
 
-      if (typeof el.onload === 'function') try { el.onload(); } catch(e) {}
+      el.dispatchEvent(new Event('load'));
     });
   }
   get contentDocument() {
@@ -1975,6 +2027,22 @@ class Element extends Node {
     this._navigateSubmit(submitter);
   }
   requestSubmit(submitter) {
+    // Per spec, a given submitter must be a submit button owned by this form;
+    // both checks run before the submit event fires. A missing/null submitter
+    // means "submit from the form itself".
+    if (submitter !== undefined && submitter !== null) {
+      if (!_isSubmitButton(submitter)) {
+        throw new TypeError(
+          "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not a submit button."
+        );
+      }
+      if (submitter.form !== this) {
+        throw new DOMException(
+          "Failed to execute 'requestSubmit' on 'HTMLFormElement': The specified element is not owned by this form element.",
+          'NotFoundError'
+        );
+      }
+    }
     const cancelled = !this.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     if (cancelled) return;
     this._navigateSubmit(submitter);
@@ -2064,8 +2132,29 @@ class Element extends Node {
     const t = this.tagName;
     return t === 'HTML' || t === 'BODY';
   }
-  get scrollTop() { return 0; } set scrollTop(v) {}
-  get scrollLeft() { return 0; } set scrollLeft(v) {}
+  // No layout engine, so there is no real overflow to scroll and the offset is
+  // deliberately NOT clamped: without real geometry any synthetic max is a
+  // guess, and a max derived from a stub scroll box pins scrollTop at 0, which
+  // deadlocks scroll-driven lazy loaders (no scroll -> no content -> no scroll).
+  // We track the offset so scrollTop/scrollLeft round-trip, and fire a scroll
+  // event on direct assignment -- lazy loaders that set `el.scrollTop = N` rely
+  // on that event, and scrollTo/scrollBy below would otherwise be its only source.
+  get scrollTop() { return this._scrollTop || 0; }
+  set scrollTop(v) {
+    v = +v;
+    const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    const changed = nv !== (this._scrollTop || 0);
+    this._scrollTop = nv;
+    if (changed && !this._scrollSuppress) this._fireScroll();
+  }
+  get scrollLeft() { return this._scrollLeft || 0; }
+  set scrollLeft(v) {
+    v = +v;
+    const nv = Number.isFinite(v) && v > 0 ? v : 0;
+    const changed = nv !== (this._scrollLeft || 0);
+    this._scrollLeft = nv;
+    if (changed && !this._scrollSuppress) this._fireScroll();
+  }
   getBoundingClientRect() {
     globalThis.__obscura_click_target = this;
     // documentElement and body span the full viewport. Without this every
@@ -2123,6 +2212,35 @@ class Element extends Node {
   get ariaSelected() { return this.getAttribute('aria-selected'); }
   set ariaSelected(v) { if (v == null) this.removeAttribute('aria-selected'); else this.setAttribute('aria-selected', String(v)); }
   scrollIntoView() { globalThis.__obscura_click_target = this; }
+  // scrollTo/scrollBy/scroll accept either (x, y) or a ScrollToOptions object.
+  // The setters fire a scroll event of their own, so suppress the per-axis ones
+  // here and emit a single event for the whole movement, the way a real browser
+  // coalesces one scroll per scroll operation rather than one per axis.
+  scrollTo(x, y) {
+    let left, top;
+    if (x !== null && typeof x === 'object') { left = x.left; top = x.top; }
+    else { left = x; top = y; }
+    this._scrollSuppress = true;
+    if (left !== undefined) this.scrollLeft = +left || 0;
+    if (top !== undefined) this.scrollTop = +top || 0;
+    this._scrollSuppress = false;
+    this._fireScroll();
+  }
+  scroll(x, y) { this.scrollTo(x, y); }
+  scrollBy(x, y) {
+    let dl, dt;
+    if (x !== null && typeof x === 'object') { dl = x.left; dt = x.top; }
+    else { dl = x; dt = y; }
+    this._scrollSuppress = true;
+    this.scrollLeft = (this.scrollLeft || 0) + (+dl || 0);
+    this.scrollTop = (this.scrollTop || 0) + (+dt || 0);
+    this._scrollSuppress = false;
+    this._fireScroll();
+  }
+  _fireScroll() {
+    const self = this;
+    setTimeout(() => { try { self.dispatchEvent(new Event('scroll', { bubbles: false })); } catch (e) {} }, 0);
+  }
   animate(keyframes, options) {
     const duration = typeof options === 'number' ? options : (options?.duration || 0);
     return {
@@ -2540,95 +2658,201 @@ class Document extends Node {
       currentNode: root,
       whatToShow: whatToShow,
       filter: filter || null,
-      _accept(node) {
+      // Three-valued per NodeFilter: 1 ACCEPT, 2 REJECT, 3 SKIP. REJECT and
+      // SKIP both mean "don't return this node", but only REJECT prunes its
+      // descendants, so nextNode() needs to tell them apart (issue #461).
+      // A node filtered out by whatToShow is a SKIP: the spec never consults
+      // the filter for it, and its descendants stay eligible.
+      _filter(node) {
         const nodeType = node.nodeType;
-        const show = (whatToShow >> (nodeType - 1)) & 1;
-        if (!show) return false;
+        if (!((whatToShow >> (nodeType - 1)) & 1)) return 3;
         if (this.filter) {
-          if (typeof this.filter === 'function') return this.filter(node) === 1;
-          if (this.filter.acceptNode) return this.filter.acceptNode(node) === 1;
+          if (typeof this.filter === 'function') return this.filter(node);
+          if (this.filter.acceptNode) return this.filter.acceptNode(node);
         }
-        return true;
+        return 1;
       },
+      _accept(node) { return this._filter(node) === 1; },
       nextNode() {
-        let node = this.currentNode;
-        let child = node.firstChild;
-        while (child) {
-          if (this._accept(child)) { this.currentNode = child; return child; }
-          if (child.firstChild) { child = child.firstChild; continue; }
-          if (child.nextSibling) { child = child.nextSibling; continue; }
-          let parent = child.parentNode;
-          while (parent && parent !== this.root) {
-            if (parent.nextSibling) { child = parent.nextSibling; break; }
-            parent = parent.parentNode;
-          }
-          if (!parent || parent === this.root) return null;
+        let node = _wrap(+_dom("next_in_subtree", this.root._nid, this.currentNode._nid));
+        while (node) {
+          const verdict = this._filter(node);
+          if (verdict === 1) { this.currentNode = node; return node; }
+          // FILTER_REJECT skips the node AND its subtree; FILTER_SKIP (and any
+          // other non-accept value) skips only the node.
+          const step = verdict === 2 ? "next_after_subtree" : "next_in_subtree";
+          node = _wrap(+_dom(step, this.root._nid, node._nid));
         }
         return null;
       },
+      // DOM 6.1 "previousNode", implemented as specified (issue #462). The old
+      // version looked at exactly one candidate — the previous sibling's
+      // deepest last child — and returned null the moment it was filtered out,
+      // so a backward walk died mid-tree the way nextNode used to before #432.
+      //
+      // Unlike nextNode this stays in JS rather than using a DOM traversal op:
+      // the descent into last children has to stop on FILTER_REJECT, so the
+      // filter is consulted at every step anyway and there is no run of
+      // crossings for a native helper to collapse.
       previousNode() {
         let node = this.currentNode;
+        while (node !== this.root) {
+          let sibling = node.previousSibling;
+          while (sibling) {
+            node = sibling;
+            let verdict = this._filter(node);
+            // Descend to the deepest last descendant, but never into a rejected
+            // subtree — that is what makes REJECT prune backwards as well.
+            while (verdict !== 2 && node.lastChild) {
+              node = node.lastChild;
+              verdict = this._filter(node);
+            }
+            if (verdict === 1) { this.currentNode = node; return node; }
+            sibling = node.previousSibling;
+          }
+          const parent = node.parentNode;
+          // Reaching root (or a detached node) ends the walk: root is never
+          // returned by a backward traversal.
+          if (!parent || node === this.root) return null;
+          node = parent;
+          if (node === this.root) return null;
+          if (this._filter(node) === 1) { this.currentNode = node; return node; }
+        }
+        return null;
+      },
+      // DOM 6.1 "traverse children" (issue #469). The movers used to step
+      // straight to the next sibling when a node was not accepted, so a
+      // FILTER_SKIP node hid its children instead of exposing them. `edge` and
+      // `step` pick the direction: first/next for forward, last/previous for
+      // backward.
+      _traverseChildren(edge, step) {
+        let node = this.currentNode[edge];
+        while (node) {
+          const verdict = this._filter(node);
+          if (verdict === 1) { this.currentNode = node; return node; }
+          // Only SKIP leaves the children eligible; REJECT prunes the subtree.
+          if (verdict === 3) {
+            const child = node[edge];
+            if (child) { node = child; continue; }
+          }
+          // Subtree exhausted: step sideways, climbing out without passing
+          // root or the node the walk started from.
+          while (node) {
+            const sibling = node[step];
+            if (sibling) { node = sibling; break; }
+            const parent = node.parentNode;
+            if (!parent || parent === this.root || parent === this.currentNode) return null;
+            node = parent;
+          }
+        }
+        return null;
+      },
+      // DOM 6.1 "traverse siblings" (issue #469).
+      _traverseSiblings(edge, step) {
+        let node = this.currentNode;
         if (node === this.root) return null;
-        let sibling = node.previousSibling;
-        if (sibling) {
-          while (sibling.lastChild) sibling = sibling.lastChild;
-          if (this._accept(sibling)) { this.currentNode = sibling; return sibling; }
+        for (;;) {
+          let sibling = node[step];
+          while (sibling) {
+            node = sibling;
+            const verdict = this._filter(node);
+            if (verdict === 1) { this.currentNode = node; return node; }
+            // Descend into a skipped sibling's subtree; a rejected one is
+            // off-limits, and a childless one has nothing to descend into.
+            sibling = node[edge];
+            if (verdict === 2 || !sibling) sibling = node[step];
+          }
+          node = node.parentNode;
+          if (!node || node === this.root) return null;
+          // An accepted parent is where the walk would go next, so there is no
+          // sibling to return.
+          if (this._filter(node) === 1) return null;
         }
-        let parent = node.parentNode;
-        if (parent && parent !== this.root && this._accept(parent)) {
-          this.currentNode = parent;
-          return parent;
-        }
-        return null;
       },
-      firstChild() {
-        let child = this.currentNode.firstChild;
-        while (child) {
-          if (this._accept(child)) { this.currentNode = child; return child; }
-          child = child.nextSibling;
-        }
-        return null;
-      },
-      lastChild() {
-        let child = this.currentNode.lastChild;
-        while (child) {
-          if (this._accept(child)) { this.currentNode = child; return child; }
-          child = child.previousSibling;
-        }
-        return null;
-      },
-      nextSibling() {
-        let sibling = this.currentNode.nextSibling;
-        while (sibling) {
-          if (this._accept(sibling)) { this.currentNode = sibling; return sibling; }
-          sibling = sibling.nextSibling;
-        }
-        return null;
-      },
-      previousSibling() {
-        let sibling = this.currentNode.previousSibling;
-        while (sibling) {
-          if (this._accept(sibling)) { this.currentNode = sibling; return sibling; }
-          sibling = sibling.previousSibling;
-        }
-        return null;
-      },
+      firstChild() { return this._traverseChildren('firstChild', 'nextSibling'); },
+      lastChild() { return this._traverseChildren('lastChild', 'previousSibling'); },
+      nextSibling() { return this._traverseSiblings('firstChild', 'nextSibling'); },
+      previousSibling() { return this._traverseSiblings('lastChild', 'previousSibling'); },
+      // DOM 6.1 "parentNode" (issue #475). The old version looked only at the
+      // immediate parent, so it couldn't climb past a skipped ancestor; it also
+      // excluded `root` as a result yet stepped to root's own parent when
+      // currentNode was root, returning a node OUTSIDE the walker's subtree.
+      // The loop's `node !== this.root` guard is what keeps the walk inside
+      // root while still allowing root itself to be returned.
       parentNode() {
-        let parent = this.currentNode.parentNode;
-        if (parent && parent !== this.root && this._accept(parent)) {
-          this.currentNode = parent;
-          return parent;
+        let node = this.currentNode;
+        while (node && node !== this.root) {
+          node = node.parentNode;
+          if (node && this._accept(node)) { this.currentNode = node; return node; }
         }
         return null;
       },
     };
     return walker;
   }
+  // A real NodeIterator (DOM 6.2), not a TreeWalker in disguise (issue #467).
+  // The two differ in more than naming: an iterator's pointer starts *before*
+  // its root, so the first nextNode() returns the root itself, and it exposes
+  // referenceNode/pointerBeforeReferenceNode/detach rather than a TreeWalker's
+  // currentNode and child/sibling movers.
   createNodeIterator(root, whatToShow, filter) {
-    return this.createTreeWalker(root, whatToShow, filter);
+    // whatToShow is unsigned long; default SHOW_ALL only when the arg is
+    // omitted. An explicit 0 (show nothing) must stay 0, not become SHOW_ALL.
+    whatToShow = (whatToShow === undefined) ? 0xFFFFFFFF : (whatToShow >>> 0);
+    return {
+      root: root,
+      referenceNode: root,
+      pointerBeforeReferenceNode: true,
+      whatToShow: whatToShow,
+      filter: filter || null,
+      // NodeIterator prunes nothing: FILTER_REJECT behaves as FILTER_SKIP, so
+      // unlike the TreeWalker only "accepted or not" matters here.
+      _accept(node) {
+        if (!((whatToShow >> (node.nodeType - 1)) & 1)) return false;
+        if (this.filter) {
+          if (typeof this.filter === 'function') return this.filter(node) === 1;
+          if (this.filter.acceptNode) return this.filter.acceptNode(node) === 1;
+        }
+        return true;
+      },
+      // DOM 6.2 "traverse". The pointer sits either before or after
+      // referenceNode, which is why reversing direction re-yields the current
+      // node instead of stepping over it.
+      _traverse(forward) {
+        let node = this.referenceNode;
+        let before = this.pointerBeforeReferenceNode;
+        for (;;) {
+          if (forward === before) {
+            // Consume the pointer's side without moving: it flips to the other
+            // side of the node it already references.
+            before = !before;
+          } else {
+            const step = forward ? "next_in_subtree" : "prev_in_subtree";
+            const next = _wrap(+_dom(step, this.root._nid, node._nid));
+            // A failed traversal leaves referenceNode and the pointer
+            // untouched, so the iterator can be resumed in either direction.
+            if (!next) return null;
+            node = next;
+          }
+          if (this._accept(node)) break;
+        }
+        this.referenceNode = node;
+        this.pointerBeforeReferenceNode = before;
+        return node;
+      },
+      nextNode() { return this._traverse(true); },
+      previousNode() { return this._traverse(false); },
+      // Legacy no-op since DOM4, but older library code still calls it and
+      // used to hit "detach is not a function".
+      detach() {},
+    };
   }
   getSelection() { return this.defaultView ? _selectionFor(this) : null; }
   get activeElement() { return globalThis.__obscura_focused || this.body; }
+  // The element that scrolls the viewport, and where the page offset lives
+  // (issue #468). Standards mode, so documentElement — quirks mode would be
+  // body, but we never parse in quirks mode.
+  get scrollingElement() { return this.documentElement; }
   get implementation() {
     const ownerDoc = this;
     return {
@@ -3040,6 +3264,7 @@ _markNative(MimeTypeArray.prototype.item);
 _markNative(MimeTypeArray.prototype.namedItem);
 
 class NetworkInformation {
+  constructor() { _makeListenerBox(this); }
   get downlink() { return 10; }
   get downlinkMax() { return Infinity; }
   get effectiveType() { return '4g'; }
@@ -4425,7 +4650,28 @@ globalThis.ElementInternals = class ElementInternals {
   get shadowRoot() { return (this._el && this._el._shadowRoot) || null; }
   get states() { return this._states; }
 };
-globalThis.NodeFilter = { SHOW_ELEMENT: 1, SHOW_TEXT: 4, SHOW_ALL: 0xFFFFFFFF };
+// Full standard constant set (issue #439). The partial version here lacked
+// FILTER_ACCEPT/REJECT/SKIP and most SHOW_* values, so the canonical
+// `acceptNode() { return NodeFilter.FILTER_ACCEPT; }` filter idiom returned
+// undefined and TreeWalker/NodeIterator rejected every node.
+globalThis.NodeFilter = {
+  SHOW_ALL: 0xFFFFFFFF,
+  SHOW_ELEMENT: 0x1,
+  SHOW_ATTRIBUTE: 0x2,
+  SHOW_TEXT: 0x4,
+  SHOW_CDATA_SECTION: 0x8,
+  SHOW_ENTITY_REFERENCE: 0x10,
+  SHOW_ENTITY: 0x20,
+  SHOW_PROCESSING_INSTRUCTION: 0x40,
+  SHOW_COMMENT: 0x80,
+  SHOW_DOCUMENT: 0x100,
+  SHOW_DOCUMENT_TYPE: 0x200,
+  SHOW_DOCUMENT_FRAGMENT: 0x400,
+  SHOW_NOTATION: 0x800,
+  FILTER_ACCEPT: 1,
+  FILTER_REJECT: 2,
+  FILTER_SKIP: 3,
+};
 // ResizeObserver is defined earlier with real per-target firing; the stub
 // that previously lived here was a no-op that clobbered the real class.
 //
@@ -5266,6 +5512,9 @@ function _structuredClone(value, seen) {
   if (value instanceof Error) {
     const Ctor = value.constructor || Error;
     const e = new Ctor(value.message);
+    // Record the clone before recursing into `cause`, otherwise a cycle
+    // through the error (e.cause === e) recurses until the stack overflows.
+    seen.set(value, e);
     if (value.name) e.name = value.name;
     if (value.stack) e.stack = value.stack;
     if (value.cause !== undefined) e.cause = _structuredClone(value.cause, seen);
@@ -5278,11 +5527,29 @@ function _structuredClone(value, seen) {
     const hook = globalThis.__obscura_clone_hooks[value[Symbol.toStringTag]];
     if (typeof hook === "function") return hook(value, seen);
   }
-  const out = Array.isArray(value) ? [] : Object.create(Object.getPrototypeOf(value));
+  // Plain objects clone onto Object.prototype (like Chrome), not the source's
+  // prototype. Define each property instead of assigning it: a source with an
+  // own enumerable `__proto__` data prop (what JSON.parse('{"__proto__":…}')
+  // yields) would otherwise hit the inherited __proto__ setter and reparent
+  // the clone instead of copying the property.
+  const out = Array.isArray(value) ? [] : {};
   seen.set(value, out);
   for (const k in value) {
     if (Object.prototype.hasOwnProperty.call(value, k)) {
-      out[k] = _structuredClone(value[k], seen);
+      const cloned = _structuredClone(value[k], seen);
+      // Only `__proto__` needs defineProperty: plain assignment would hit the
+      // inherited prototype setter and reparent the clone instead of adding an
+      // own data property. Every other key takes the fast assignment path.
+      if (k === "__proto__") {
+        Object.defineProperty(out, k, {
+          value: cloned,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        out[k] = cloned;
+      }
     }
   }
   // Symbols are not enumerable via for-in; copy own symbol-keyed properties.
@@ -5882,6 +6149,7 @@ _markNative(globalThis.Selection);
   Element.prototype.cloneNode, Element.prototype.attachShadow,
   Element.prototype.insertAdjacentHTML, Element.prototype.insertAdjacentText,
   Element.prototype.insertAdjacentElement, Element.prototype.scrollIntoView,
+  Element.prototype.scrollTo, Element.prototype.scrollBy, Element.prototype.scroll,
   Element.prototype.append, Element.prototype.prepend, Element.prototype.remove,
   Element.prototype.before, Element.prototype.after, Element.prototype.replaceWith,
   HTMLFormElement.prototype.reset,
@@ -5983,9 +6251,33 @@ class _IframeDocument {
   get implementation() { return document.implementation; }
   get styleSheets() { return []; }
 
-  addEventListener() {}
-  removeEventListener() {}
-  dispatchEvent() { return true; }
+  addEventListener(type, listener) {
+    if (typeof listener !== 'function') return;
+    if (!this._listeners) this._listeners = Object.create(null);
+    const list = this._listeners[type] || (this._listeners[type] = []);
+    if (!list.includes(listener)) list.push(listener);
+  }
+  removeEventListener(type, listener) {
+    const list = this._listeners && this._listeners[type];
+    if (!list) return;
+    const index = list.indexOf(listener);
+    if (index !== -1) list.splice(index, 1);
+  }
+  dispatchEvent(event) {
+    const type = event && event.type;
+    if (!type) return true;
+    const list = this._listeners && this._listeners[type];
+    if (list) {
+      for (const listener of list.slice()) {
+        try { listener.call(this, event); } catch (error) { console.error(error); }
+      }
+    }
+    const handler = this['on' + type];
+    if (typeof handler === 'function') {
+      try { handler.call(this, event); } catch (error) { console.error(error); }
+    }
+    return !event.defaultPrevented;
+  }
 
   write(html) {
     if (this._body) this._body.innerHTML += html;
@@ -6983,9 +7275,63 @@ URL.revokeObjectURL = function(url) {
   delete globalThis.__blobStore[url];
 };
 
-globalThis.scrollTo = function(x, y) {};
-globalThis.scrollBy = function(x, y) {};
-globalThis.scroll = function(x, y) {};
+// Window-level scrolling (issue #468). #431 gave elements functional
+// scrollTop/scrollLeft plus scroll methods, but left these three as no-ops, so
+// the dominant infinite-scroll idiom -- window.scrollTo(0, body.scrollHeight),
+// window.scrollBy(0, 500), then a window 'scroll' listener -- did nothing at
+// all: the offset never moved and no event ever fired.
+//
+// The page offset is stored on the scrolling element rather than in separate
+// window state, so window.scrollY and document.scrollingElement.scrollTop are
+// two views of one value, which is what pages assume. As with #431 there is no
+// layout, so the offset still cannot be clamped to a real maximum.
+function _scrollRoot() {
+  const doc = globalThis.document;
+  return (doc && doc.scrollingElement) || null;
+}
+function _windowScroll(x, y, relative) {
+  const root = _scrollRoot();
+  if (!root) return;
+  let left, top;
+  if (x !== null && typeof x === 'object') { left = x.left; top = x.top; }
+  else { left = x; top = y; }
+  if (left !== undefined) {
+    root.scrollLeft = (relative ? (root.scrollLeft || 0) : 0) + (+left || 0);
+  }
+  if (top !== undefined) {
+    root.scrollTop = (relative ? (root.scrollTop || 0) : 0) + (+top || 0);
+  }
+  // Async, matching the element path #431 added. Dispatched at the document
+  // AND the window: a page scroll event reaches both in Chrome, but
+  // Document.dispatchEvent here runs only its own listeners and does not
+  // propagate, so firing once would strand half the listeners.
+  setTimeout(() => {
+    try {
+      const doc = globalThis.document;
+      if (doc) doc.dispatchEvent(new Event('scroll', { bubbles: false }));
+      globalThis.dispatchEvent(new Event('scroll', { bubbles: false }));
+    } catch (e) {}
+  }, 0);
+}
+globalThis.scrollTo = function(x, y) { _windowScroll(x, y, false); };
+globalThis.scrollBy = function(x, y) { _windowScroll(x, y, true); };
+globalThis.scroll = function(x, y) { _windowScroll(x, y, false); };
+_markNative(globalThis.scrollTo);
+_markNative(globalThis.scrollBy);
+_markNative(globalThis.scroll);
+// Read-only accessors, as on a real Window: assigning window.scrollY does not
+// scroll the page. These replace the hard-coded 0 data properties defined
+// earlier, so they must stay after them.
+for (const [name, offset] of [
+  ['scrollX', 'scrollLeft'], ['pageXOffset', 'scrollLeft'],
+  ['scrollY', 'scrollTop'], ['pageYOffset', 'scrollTop'],
+]) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    enumerable: true,
+    get() { const root = _scrollRoot(); return root ? (root[offset] || 0) : 0; },
+  });
+}
 globalThis.focus = function() {}; _markNative(globalThis.focus);
 globalThis.blur = function() {}; _markNative(globalThis.blur);
 globalThis.print = function() {}; _markNative(globalThis.print);
@@ -7094,8 +7440,13 @@ if (!globalThis.crypto.subtle) {
   // _structuredClone via Symbol.toStringTag ("CryptoKey"); registered lazily
   // because structuredClone is defined before this block (issue #389).
   globalThis.__obscura_clone_hooks = globalThis.__obscura_clone_hooks || {};
-  globalThis.__obscura_clone_hooks["CryptoKey"] = function (src) {
+  // `seen` is the clone memo _structuredClone hands every hook. Populate it so
+  // one key reached twice in a graph clones to one shared object (and its key
+  // material is registered once), matching structuredClone's identity rules.
+  globalThis.__obscura_clone_hooks["CryptoKey"] = function (src, seen) {
+    if (seen && seen.has(src)) return seen.get(src);
     const copy = makeKey(src.type, src.extractable, src.algorithm, src.usages, keyBytes(src));
+    if (seen) seen.set(src, copy);
     return copy;
   };
 
@@ -7398,21 +7749,28 @@ if (typeof Image === 'undefined') {
     // `.src` flips `complete` and fires `load` on a microtask-later tick. Lazy
     // loaders and preloaders that create `new Image()`, set `.src`, and wait for
     // `onload` (or addEventListener('load')) would hang forever otherwise.
-    Object.defineProperty(img, 'src', {
-      configurable: true, enumerable: true,
-      get() { return _imgSrcDesc.get.call(img); },
-      set(v) {
-        _imgSrcDesc.set.call(img, v);
-        if (!img.getAttribute('src')) return;
-        img.complete = false;
-        setTimeout(function () {
-          img.complete = true;
-          img.naturalWidth = img.naturalWidth || img.width || 0;
-          img.naturalHeight = img.naturalHeight || img.height || 0;
-          try { img.dispatchEvent(new Event('load')); } catch (e) {}
-        }, 0);
-      },
-    });
+    // Anti-bot scripts (Booking.com, issue #394) pre-define a non-configurable
+    // own `src` on <img> elements; redefining it throws "Cannot redefine
+    // property: src" and kills the constructor. Skip the load emulation then:
+    // a page that owns `src` is instrumenting loads itself.
+    const ownSrc = Object.getOwnPropertyDescriptor(img, 'src');
+    if (!ownSrc || ownSrc.configurable) {
+      Object.defineProperty(img, 'src', {
+        configurable: true, enumerable: true,
+        get() { return _imgSrcDesc.get.call(img); },
+        set(v) {
+          _imgSrcDesc.set.call(img, v);
+          if (!img.getAttribute('src')) return;
+          img.complete = false;
+          setTimeout(function () {
+            img.complete = true;
+            img.naturalWidth = img.naturalWidth || img.width || 0;
+            img.naturalHeight = img.naturalHeight || img.height || 0;
+            try { img.dispatchEvent(new Event('load')); } catch (e) {}
+          }, 0);
+        },
+      });
+    }
     return img;
   };
   globalThis.Image.prototype = globalThis.HTMLImageElement.prototype;
@@ -7626,11 +7984,6 @@ if (typeof Selection === 'undefined') {
     getRangeAt(){return null;} collapse(){} extend(){} selectAllChildren(){} deleteFromDocument(){}
     addRange(){} removeRange(){} removeAllRanges(){} toString(){return '';}
   };
-}
-
-if (typeof NodeFilter === 'undefined') {
-  globalThis.NodeFilter = { SHOW_ALL:0xFFFFFFFF, SHOW_ELEMENT:1, SHOW_TEXT:4, SHOW_COMMENT:128,
-    FILTER_ACCEPT:1, FILTER_REJECT:2, FILTER_SKIP:3 };
 }
 
 if (typeof TreeWalker === 'undefined') {
