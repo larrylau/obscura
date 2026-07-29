@@ -419,6 +419,8 @@ Start a CDP WebSocket server.
 | `--stealth` | off | Enable anti-detection + tracker blocking |
 | `--workers` | `1` | Number of parallel worker processes |
 | `--obey-robots` | off | Respect robots.txt |
+| `--allow-private-network` | off | Allow fetching localhost/RFC1918 addresses |
+| `--insecure` | off | Ignore SSL certificate errors (self-signed, expired, etc.) |
 
 ### `obscura fetch <URL>`
 
@@ -435,6 +437,8 @@ Fetch and render a single page.
 | `--output` | — | Write dump or eval output to a file |
 | `--quiet` | off | Suppress banner |
 | `--proxy` | — | Inherited global HTTP/SOCKS5 proxy URL |
+| `--allow-private-network` | off | Allow fetching localhost/RFC1918 addresses |
+| `--insecure` | off | Ignore SSL certificate errors (self-signed, expired, etc.) |
 
 ### `obscura scrape <URL...>`
 
@@ -447,6 +451,8 @@ Scrape multiple URLs in parallel with worker processes.
 | `--format` | `json` | Output: `json` or `text` |
 | `--quiet` | off | Suppress scrape progress on stderr |
 | `--proxy` | — | Inherited global HTTP/SOCKS5 proxy URL for all workers |
+| `--allow-private-network` | off | Allow fetching localhost/RFC1918 addresses |
+| `--insecure` | off | Ignore SSL certificate errors (self-signed, expired, etc.) |
 
 ## MCP (Model Context Protocol)
 
@@ -474,6 +480,7 @@ Optional flags (both transports):
 | `--proxy <URL>` | HTTP/SOCKS5 proxy |
 | `--user-agent <UA>` | Custom User-Agent string |
 | `--stealth` | Enable anti-detection mode |
+| `--insecure` | Ignore SSL certificate errors (self-signed, expired, etc.) |
 
 ### Claude Desktop config
 
