@@ -177,6 +177,7 @@ impl BrowserContext {
             cookie_jar.clone(),
             self.proxy_url.as_deref(),
             self.allow_private_network,
+            self.accept_invalid_certs,
         );
         if self.stealth {
             client.block_trackers = true;
@@ -200,6 +201,7 @@ impl BrowserContext {
             allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
             allow_private_network: self.allow_private_network,
+            accept_invalid_certs: self.accept_invalid_certs,
         }
     }
 
@@ -264,6 +266,7 @@ mod tests {
             None,
             false,
             Some("Template-UA/1.0".to_string()),
+            false,
         );
         source.cookie_jar.set_cookie("sid=source", &url::Url::parse("https://example.com").unwrap());
 
